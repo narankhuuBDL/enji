@@ -13,6 +13,9 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <!-- Canvas Confetti CDN -->
     <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+    <!-- Firebase App & Firestore SDK (Compat) -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
     <!-- Google Fonts: Plus Jakarta Sans & Noto Sans (Cyrillic support) -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -111,6 +114,35 @@
 
     <script type="text/babel">
         const { useState, useEffect, useRef, useMemo } = React;
+
+        // ==========================================
+        // 0. FIREBASE CLOUD FIRESTORE ТОХИРГОО
+        // ==========================================
+        const firebaseConfig = {
+  apiKey: "AIzaSyBG-XSp4vvxH14zBGsROHhjKnaZHp4llq8",
+  authDomain: "nb-geo.firebaseapp.com",
+  projectId: "nb-geo",
+  storageBucket: "nb-geo.firebasestorage.app",
+  messagingSenderId: "730940857353",
+  appId: "1:730940857353:web:4431faa5e891d44d9aecd8",
+  measurementId: "G-17SGCH3BG4"
+};
+
+        const isFirebaseConfigured = firebaseConfig.apiKey && !firebaseConfig.apiKey.includes("ТАНЫ_");
+        let db = null;
+        let appDocRef = null;
+
+        if (isFirebaseConfigured && window.firebase) {
+            try {
+                if (!firebase.apps.length) {
+                    firebase.initializeApp(firebaseConfig);
+                }
+                db = firebase.firestore();
+                appDocRef = db.collection('niigmiin_ukhaan_360').doc('main_state');
+            } catch (err) {
+                console.error("Firebase эхлүүлэх үеийн алдаа:", err);
+            }
+        }
 
         // ==========================================
         // 1. WEB AUDIO API SOUND ENGINE
@@ -581,6 +613,10 @@
         // 3. MAIN APPLICATION COMPONENT
         // ==========================================
         function App() {
+            const [syncStatus, setSyncStatus] = useState(appDocRef ? 'connecting' : 'local');
+            const isRemoteUpdate = useRef(false);
+            const isInitialMount = useRef(true);
+
             // Persistent Curriculum Data
             const [data, setData] = useState(() => {
                 try {
@@ -657,22 +693,83 @@
                 setConfirmDialog({ title, message, onConfirm });
             };
 
-            // Save to localStorage
+            // ==========================================
+            // FIREBASE REAL-TIME SYNC (READ & WRITE)
+            // ==========================================
+            useEffect(() => {
+                if (!appDocRef) return;
+
+                const unsubscribe = appDocRef.onSnapshot((doc) => {
+                    setSyncStatus('connected');
+                    if (doc.exists) {
+                        const remote = doc.data();
+                        isRemoteUpdate.current = true;
+                        if (remote.curriculum) {
+                            setData({ ...DEFAULT_DATA, ...remote.curriculum });
+                        }
+                        if (Array.isArray(remote.students) && remote.students.length > 0) {
+                            setStudents(remote.students);
+                        }
+                        if (Array.isArray(remote.teams)) {
+                            setTeams(remote.teams);
+                        }
+                        if (Array.isArray(remote.auctionHistory)) {
+                            setAuctionHistory(remote.auctionHistory);
+                        }
+                    } else {
+                        appDocRef.set({
+                            curriculum: data,
+                            students: students,
+                            teams: teams,
+                            auctionHistory: auctionHistory,
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+                        }).catch(err => console.error("Анхны өгөгдөл бичих алдаа:", err));
+                    }
+                }, (error) => {
+                    console.error("Firebase холболтын алдаа:", error);
+                    setSyncStatus('error');
+                });
+
+                return () => unsubscribe();
+            }, []);
+
+            // LocalStorage болон Firebase руу өөрчлөлтүүдийг хадгалах
             useEffect(() => {
                 localStorage.setItem('niigmiin_ukhaan_360_v2', JSON.stringify(data));
-            }, [data]);
-
-            useEffect(() => {
                 localStorage.setItem('niigmiin_ukhaan_students_v2', JSON.stringify(students));
-            }, [students]);
+                localStorage.setItem('niigmiin_ukhaan_teams_v2', JSON.stringify(teams));
+
+                if (!appDocRef) return;
+
+                if (isInitialMount.current) {
+                    isInitialMount.current = false;
+                    return;
+                }
+
+                if (isRemoteUpdate.current) {
+                    isRemoteUpdate.current = false;
+                    return;
+                }
+
+                const timer = setTimeout(() => {
+                    appDocRef.set({
+                        curriculum: data,
+                        students: students,
+                        teams: teams,
+                        auctionHistory: auctionHistory,
+                        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+                    }, { merge: true }).catch(err => {
+                        console.error("Firebase хадгалах алдаа:", err);
+                        setSyncStatus('error');
+                    });
+                }, 400);
+
+                return () => clearTimeout(timer);
+            }, [data, students, teams, auctionHistory]);
 
             useEffect(() => {
                 localStorage.setItem('niigmiin_ukhaan_active_st_v2', activeStudentId);
             }, [activeStudentId]);
-
-            useEffect(() => {
-                localStorage.setItem('niigmiin_ukhaan_teams_v2', JSON.stringify(teams));
-            }, [teams]);
 
             const activeStudent = useMemo(() => {
                 return students.find(s => s.id === activeStudentId) || students[0];
@@ -874,9 +971,39 @@
                                     🎓
                                 </div>
                                 <div>
-                                    <h1 className="font-heading text-lg sm:text-xl font-extrabold bg-gradient-to-r from-indigo-700 to-purple-600 bg-clip-text text-transparent">
-                                        Нийгмийн Ухаан 360°
-                                    </h1>
+                                    <div className="flex items-center gap-2">
+                                        <h1 className="font-heading text-lg sm:text-xl font-extrabold bg-gradient-to-r from-indigo-700 to-purple-600 bg-clip-text text-transparent">
+                                            Нийгмийн Ухаан 360°
+                                        </h1>
+                                        <span
+                                            title={
+                                                syncStatus === 'connected'
+                                                    ? 'Firebase өгөгдлийн сантай шууд холбогдсон'
+                                                    : syncStatus === 'connecting'
+                                                    ? 'Firebase-тай холбогдож байна...'
+                                                    : syncStatus === 'error'
+                                                    ? 'Firebase холболтын алдаа (Дүрэм эсвэл Config шалгана уу)'
+                                                    : 'Зөвхөн энэ төхөөрөмж дээр хадгалж байна (Firebase Config оруулаагүй)'
+                                            }
+                                            className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                                                syncStatus === 'connected'
+                                                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                                    : syncStatus === 'connecting'
+                                                    ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                                    : syncStatus === 'error'
+                                                    ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                                    : 'bg-slate-100 text-slate-500 border-slate-200'
+                                            }`}
+                                        >
+                                            {syncStatus === 'connected'
+                                                ? '🟢 Cloud Sync'
+                                                : syncStatus === 'connecting'
+                                                ? '🟡 Холбож байна...'
+                                                : syncStatus === 'error'
+                                                ? '🔴 Алдаа'
+                                                : '⚪ Local'}
+                                        </span>
+                                    </div>
                                     <p className="text-[11px] text-slate-500 font-medium">Интерактив хичээл ба үнэлгээний систем</p>
                                 </div>
                             </div>
@@ -1182,7 +1309,9 @@
                     <footer className="bg-white border-t border-slate-200/80 py-4 mt-10 no-print">
                         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
                             <div>🇲🇳 Нийгмийн Ухаан 360° — Багш, сурагч болон анги хамт олонд зориулсан нээлттэй платформ</div>
-                            <div className="font-semibold text-indigo-600">Өгөгдөл таны хөтөч дээр автоматаар хадгалагдана</div>
+                            <div className="font-semibold text-indigo-600">
+                                {syncStatus === 'connected' ? '☁️ Firebase Cloud өгөгдлийн сантай холбогдсон' : 'Өгөгдөл автоматаар хадгалагдана'}
+                            </div>
                         </div>
                     </footer>
                 </div>
@@ -3022,11 +3151,11 @@
             const fileInputRef = useRef(null);
             const [newPin, setNewPin] = useState('');
 
-            // 1. Topics CRUD State (Add & Edit)
+            // 1. Topics CRUD State
             const [editingTopicId, setEditingTopicId] = useState(null);
             const [topicForm, setTopicForm] = useState({ title: '', icon: '📘', description: '' });
 
-            // 2. Quizzes CRUD State (Add & Edit)
+            // 2. Quizzes CRUD State
             const [editingQuizId, setEditingQuizId] = useState(null);
             const [quizForm, setQuizForm] = useState({
                 topicId: data.topics[0]?.id || '',
@@ -3037,7 +3166,7 @@
                 explanation: ''
             });
 
-            // 3. Flashcards CRUD State (Add & Edit)
+            // 3. Flashcards CRUD State
             const [editingCardId, setEditingCardId] = useState(null);
             const [cardForm, setCardForm] = useState({
                 topicId: data.topics[0]?.id || '',
@@ -3046,7 +3175,7 @@
                 example: ''
             });
 
-            // 4. Simulations CRUD State (Add & Edit)
+            // 4. Simulations CRUD State
             const [editingSimId, setEditingSimId] = useState(null);
             const [simForm, setSimForm] = useState({
                 topicId: data.topics[0]?.id || '',
@@ -3058,7 +3187,7 @@
                 c3Text: '', c3Cons: ''
             });
 
-            // 5. Fact-Checks CRUD State (Add & Edit)
+            // 5. Fact-Checks CRUD State
             const [editingFcId, setEditingFcId] = useState(null);
             const [fcForm, setFcForm] = useState({
                 topicId: data.topics[0]?.id || '',
@@ -3069,7 +3198,7 @@
                 explanation: ''
             });
 
-            // 6. Jeopardy CRUD State (Edit Category & Questions)
+            // 6. Jeopardy CRUD State
             const [jeopardyForm, setJeopardyForm] = useState({
                 catId: data.jeopardyCategories[0]?.id || '',
                 points: 100,
@@ -3077,13 +3206,13 @@
                 answer: ''
             });
 
-            // 7. Wheel CRUD State (Add & Edit)
+            // 7. Wheel CRUD State
             const [editingWheelTopicIdx, setEditingWheelTopicIdx] = useState(null);
             const [wheelTopicInput, setWheelTopicInput] = useState('');
             const [editingWheelRoleIdx, setEditingWheelRoleIdx] = useState(null);
             const [wheelRoleInput, setWheelRoleInput] = useState('');
 
-            // 8. Auction Perks CRUD State (Add & Edit)
+            // 8. Auction Perks CRUD State
             const [editingPerkId, setEditingPerkId] = useState(null);
             const [perkForm, setPerkForm] = useState({
                 icon: '🎟️',
@@ -3092,7 +3221,7 @@
                 startPrice: 500
             });
 
-            // 9. Students Roster CRUD State (Add Single, Bulk, Edit)
+            // 9. Students Roster CRUD State
             const [editingStudentId, setEditingStudentId] = useState(null);
             const [studentSingleForm, setStudentSingleForm] = useState({ name: '', className: '11А' });
             const [bulkStudentText, setBulkStudentText] = useState('');
@@ -3298,13 +3427,10 @@
                         ))}
                     </div>
 
-                    {/* ==========================================
-                        TAB: STUDENTS ROSTER (ADD SINGLE / BULK / EDIT / DELETE)
-                    ========================================== */}
+                    {/* TAB: STUDENTS ROSTER */}
                     {tab === 'students' && (
                         <div className="space-y-6">
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                {/* Add or Edit Single Student */}
                                 <form
                                     onSubmit={(e) => {
                                         e.preventDefault();
@@ -3377,7 +3503,6 @@
                                     </div>
                                 </form>
 
-                                {/* Bulk Add Students */}
                                 <form
                                     onSubmit={(e) => {
                                         e.preventDefault();
@@ -3425,7 +3550,6 @@
                                 </form>
                             </div>
 
-                            {/* Students Roster Table */}
                             <div className="border border-slate-200 rounded-2xl overflow-x-auto">
                                 <table className="w-full text-left text-xs">
                                     <thead className="bg-slate-100 text-slate-700 font-bold">
@@ -3494,9 +3618,7 @@
                         </div>
                     )}
 
-                    {/* ==========================================
-                        TAB: CLASS SUMMARY REPORT (EXCEL CSV & PDF PRINT)
-                    ========================================== */}
+                    {/* TAB: CLASS SUMMARY REPORT */}
                     {tab === 'classReport' && (
                         <div className="space-y-6 print-container">
                             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -3600,9 +3722,7 @@
                         </div>
                     )}
 
-                    {/* ==========================================
-                        TAB 1: TOPICS CRUD (ADD / EDIT / DELETE)
-                    ========================================== */}
+                    {/* TAB 1: TOPICS CRUD */}
                     {tab === 'topics' && (
                         <div className="space-y-5">
                             <form
@@ -3709,9 +3829,7 @@
                         </div>
                     )}
 
-                    {/* ==========================================
-                        TAB 2: QUIZZES CRUD (ADD / EDIT / DELETE)
-                    ========================================== */}
+                    {/* TAB 2: QUIZZES CRUD */}
                     {tab === 'quizzes' && (
                         <div className="space-y-5">
                             <form
@@ -3860,9 +3978,7 @@
                         </div>
                     )}
 
-                    {/* ==========================================
-                        TAB 3: FLASHCARDS CRUD (ADD / EDIT / DELETE)
-                    ========================================== */}
+                    {/* TAB 3: FLASHCARDS CRUD */}
                     {tab === 'flashcards' && (
                         <div className="space-y-5">
                             <form
@@ -3972,9 +4088,7 @@
                         </div>
                     )}
 
-                    {/* ==========================================
-                        TAB 4: SIMULATIONS CRUD (ADD / EDIT / DELETE)
-                    ========================================== */}
+                    {/* TAB 4: SIMULATIONS CRUD */}
                     {tab === 'simulations' && (
                         <div className="space-y-5">
                             <form
@@ -4134,9 +4248,7 @@
                         </div>
                     )}
 
-                    {/* ==========================================
-                        TAB 5: FACT-CHECKS CRUD (ADD / EDIT / DELETE)
-                    ========================================== */}
+                    {/* TAB 5: FACT-CHECKS CRUD */}
                     {tab === 'factchecks' && (
                         <div className="space-y-5">
                             <form
@@ -4268,9 +4380,7 @@
                         </div>
                     )}
 
-                    {/* ==========================================
-                        TAB 6: JEOPARDY QUESTIONS CRUD (EDIT TILE & CATEGORY)
-                    ========================================== */}
+                    {/* TAB 6: JEOPARDY QUESTIONS CRUD */}
                     {tab === 'jeopardy' && (
                         <div className="space-y-5">
                             <form
@@ -4374,9 +4484,7 @@
                         </div>
                     )}
 
-                    {/* ==========================================
-                        TAB 7: WHEEL TOPICS & ROLES CRUD (ADD / EDIT / DELETE)
-                    ========================================== */}
+                    {/* TAB 7: WHEEL TOPICS & ROLES CRUD */}
                     {tab === 'wheel' && (
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div className="space-y-3">
@@ -4411,24 +4519,18 @@
                                     <button type="submit" className="px-4 py-2 bg-indigo-600 text-white font-bold rounded-xl text-xs">
                                         {editingWheelTopicIdx !== null ? 'Хадгалах ✓' : '+ Нэмэх'}
                                     </button>
-                                    {editingWheelTopicIdx !== null && (
-                                        <button
-                                            type="button"
-                                            onClick={() => { setEditingWheelTopicIdx(null); setWheelTopicInput(''); }}
-                                            className="px-2.5 py-2 bg-slate-200 text-slate-700 font-bold rounded-xl text-xs"
-                                        >
-                                            ✕
-                                        </button>
-                                    )}
                                 </form>
-                                <div className="space-y-2">
+                                <div className="space-y-1.5">
                                     {data.wheelTopics.map((wt, i) => (
-                                        <div key={i} className="p-3 border border-slate-200 rounded-xl flex justify-between items-center text-xs gap-2">
+                                        <div key={i} className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl flex justify-between items-center gap-2 text-xs">
                                             <span>{wt}</span>
                                             <div className="flex gap-1.5 shrink-0">
                                                 <button
-                                                    onClick={() => { setEditingWheelTopicIdx(i); setWheelTopicInput(wt); }}
-                                                    className="text-blue-600 font-bold"
+                                                    onClick={() => {
+                                                        setEditingWheelTopicIdx(i);
+                                                        setWheelTopicInput(wt);
+                                                    }}
+                                                    className="text-blue-700 font-bold"
                                                 >
                                                     ✏️
                                                 </button>
@@ -4445,7 +4547,7 @@
                             </div>
 
                             <div className="space-y-3">
-                                <h3 className="font-bold text-sm text-slate-800">🎭 Хүрдний дүр ба байр сууриуд</h3>
+                                <h3 className="font-bold text-sm text-slate-800">🎭 Хүрдний дүр ба байр суурь</h3>
                                 <form
                                     onSubmit={(e) => {
                                         e.preventDefault();
@@ -4468,7 +4570,7 @@
                                     <input
                                         type="text"
                                         required
-                                        placeholder="Дүр (жнь: 📰 Сэтгүүлч)"
+                                        placeholder="Дүр эсвэл байр суурь..."
                                         value={wheelRoleInput}
                                         onChange={(e) => setWheelRoleInput(e.target.value)}
                                         className="flex-1 p-2.5 rounded-xl border border-slate-200 text-xs"
@@ -4476,24 +4578,18 @@
                                     <button type="submit" className="px-4 py-2 bg-purple-600 text-white font-bold rounded-xl text-xs">
                                         {editingWheelRoleIdx !== null ? 'Хадгалах ✓' : '+ Нэмэх'}
                                     </button>
-                                    {editingWheelRoleIdx !== null && (
-                                        <button
-                                            type="button"
-                                            onClick={() => { setEditingWheelRoleIdx(null); setWheelRoleInput(''); }}
-                                            className="px-2.5 py-2 bg-slate-200 text-slate-700 font-bold rounded-xl text-xs"
-                                        >
-                                            ✕
-                                        </button>
-                                    )}
                                 </form>
-                                <div className="space-y-2">
+                                <div className="space-y-1.5">
                                     {data.wheelRoles.map((wr, i) => (
-                                        <div key={i} className="p-3 border border-slate-200 rounded-xl flex justify-between items-center text-xs gap-2">
+                                        <div key={i} className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl flex justify-between items-center gap-2 text-xs">
                                             <span>{wr}</span>
                                             <div className="flex gap-1.5 shrink-0">
                                                 <button
-                                                    onClick={() => { setEditingWheelRoleIdx(i); setWheelRoleInput(wr); }}
-                                                    className="text-blue-600 font-bold"
+                                                    onClick={() => {
+                                                        setEditingWheelRoleIdx(i);
+                                                        setWheelRoleInput(wr);
+                                                    }}
+                                                    className="text-blue-700 font-bold"
                                                 >
                                                     ✏️
                                                 </button>
@@ -4511,16 +4607,14 @@
                         </div>
                     )}
 
-                    {/* ==========================================
-                        TAB 8: AUCTION PERKS CRUD (ADD / EDIT / DELETE)
-                    ========================================== */}
+                    {/* TAB 8: AUCTION PERKS CRUD */}
                     {tab === 'auction' && (
                         <div className="space-y-5">
                             <form
                                 onSubmit={(e) => {
                                     e.preventDefault();
                                     if (!perkForm.title.trim()) return;
-                                    const payload = { ...perkForm, startPrice: Number(perkForm.startPrice) };
+                                    const payload = { ...perkForm, startPrice: Number(perkForm.startPrice) || 500 };
                                     if (editingPerkId) {
                                         setData(prev => ({
                                             ...prev,
@@ -4537,43 +4631,48 @@
                                     }
                                     setPerkForm({ icon: '🎟️', title: '', desc: '', startPrice: 500 });
                                 }}
-                                className="bg-slate-50 p-5 rounded-2xl border border-slate-200 grid grid-cols-1 sm:grid-cols-4 gap-3"
+                                className="bg-slate-50 p-5 rounded-2xl border border-slate-200 space-y-3"
                             >
-                                <input
-                                    type="text"
-                                    placeholder="Эможи (жнь: 🎟️)"
-                                    value={perkForm.icon}
-                                    onChange={(e) => setPerkForm({ ...perkForm, icon: e.target.value })}
-                                    className="p-2.5 rounded-xl border border-slate-200 text-xs bg-white text-center"
-                                />
-                                <input
-                                    type="text"
-                                    required
-                                    placeholder="Эрхийн нэр..."
-                                    value={perkForm.title}
-                                    onChange={(e) => setPerkForm({ ...perkForm, title: e.target.value })}
-                                    className="sm:col-span-2 p-2.5 rounded-xl border border-slate-200 text-xs bg-white"
-                                />
-                                <input
-                                    type="number"
-                                    min="100"
-                                    step="100"
-                                    required
-                                    placeholder="Эхлэх үнэ (₮)"
-                                    value={perkForm.startPrice}
-                                    onChange={(e) => setPerkForm({ ...perkForm, startPrice: Number(e.target.value) })}
-                                    className="p-2.5 rounded-xl border border-slate-200 text-xs bg-white"
-                                />
+                                <div className="font-bold text-xs uppercase text-slate-700">
+                                    {editingPerkId ? '✏️ Дуудлага худалдааны эрх засах' : '➕ Дуудлага худалдааны шинэ эрх нэмэх'}
+                                </div>
+                                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                                    <input
+                                        type="text"
+                                        placeholder="Эможи (жнь: 🎟️)"
+                                        value={perkForm.icon}
+                                        onChange={(e) => setPerkForm({ ...perkForm, icon: e.target.value })}
+                                        className="p-2.5 rounded-xl border border-slate-200 text-xs bg-white text-center"
+                                    />
+                                    <input
+                                        type="text"
+                                        required
+                                        placeholder="Эрхийн нэр..."
+                                        value={perkForm.title}
+                                        onChange={(e) => setPerkForm({ ...perkForm, title: e.target.value })}
+                                        className="sm:col-span-2 p-2.5 rounded-xl border border-slate-200 text-xs bg-white"
+                                    />
+                                    <input
+                                        type="number"
+                                        required
+                                        min="100"
+                                        step="100"
+                                        placeholder="Эхлэх үнэ (₮)"
+                                        value={perkForm.startPrice}
+                                        onChange={(e) => setPerkForm({ ...perkForm, startPrice: Number(e.target.value) })}
+                                        className="p-2.5 rounded-xl border border-slate-200 text-xs bg-white font-bold"
+                                    />
+                                </div>
                                 <input
                                     type="text"
                                     placeholder="Тайлбар..."
                                     value={perkForm.desc}
                                     onChange={(e) => setPerkForm({ ...perkForm, desc: e.target.value })}
-                                    className="sm:col-span-3 p-2.5 rounded-xl border border-slate-200 text-xs bg-white"
+                                    className="w-full p-2.5 rounded-xl border border-slate-200 text-xs bg-white"
                                 />
-                                <div className="flex gap-1.5">
-                                    <button type="submit" className="flex-1 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl text-xs p-2.5">
-                                        {editingPerkId ? 'Хадгалах ✓' : '+ Эрх нэмэх'}
+                                <div className="flex gap-2">
+                                    <button type="submit" className="flex-1 py-2.5 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl text-xs">
+                                        {editingPerkId ? 'Өөрчлөлтийг хадгалах ✓' : '+ Эрх нэмэх'}
                                     </button>
                                     {editingPerkId && (
                                         <button
@@ -4582,39 +4681,40 @@
                                                 setEditingPerkId(null);
                                                 setPerkForm({ icon: '🎟️', title: '', desc: '', startPrice: 500 });
                                             }}
-                                            className="px-3 bg-slate-200 text-slate-700 font-bold rounded-xl text-xs"
+                                            className="px-4 py-2.5 bg-slate-200 text-slate-700 font-bold rounded-xl text-xs"
                                         >
-                                            ✕
+                                            Болих
                                         </button>
                                     )}
                                 </div>
                             </form>
 
-                            <div className="space-y-2.5">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                 {data.auctionPerks.map(ap => (
-                                    <div key={ap.id} className="p-4 border border-slate-200 rounded-2xl flex items-center justify-between gap-2">
-                                        <div className="flex items-center gap-3">
+                                    <div key={ap.id} className="p-4 border border-slate-200 rounded-2xl flex items-start justify-between gap-2">
+                                        <div className="flex items-start gap-3">
                                             <span className="text-2xl">{ap.icon}</span>
                                             <div>
                                                 <div className="font-bold text-sm text-slate-800">{ap.title}</div>
-                                                <div className="text-xs text-slate-500">Эхлэх үнэ: <strong>{ap.startPrice} ₮</strong> • {ap.desc}</div>
+                                                <div className="text-xs text-amber-700 font-extrabold mt-0.5">Эхлэх үнэ: {ap.startPrice} ₮</div>
+                                                <p className="text-xs text-slate-500 mt-1">{ap.desc}</p>
                                             </div>
                                         </div>
-                                        <div className="flex gap-1.5 shrink-0">
+                                        <div className="flex gap-1 shrink-0">
                                             <button
                                                 onClick={() => {
                                                     setEditingPerkId(ap.id);
                                                     setPerkForm({ icon: ap.icon, title: ap.title, desc: ap.desc || '', startPrice: ap.startPrice });
                                                 }}
-                                                className="text-blue-700 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-xl text-xs font-bold"
+                                                className="text-blue-700 bg-blue-50 hover:bg-blue-100 px-2 py-1 rounded text-xs font-bold"
                                             >
-                                                Засах ✏️
+                                                ✏️
                                             </button>
                                             <button
                                                 onClick={() => setData(prev => ({ ...prev, auctionPerks: prev.auctionPerks.filter(x => x.id !== ap.id) }))}
-                                                className="text-rose-600 bg-rose-50 hover:bg-rose-100 px-3 py-1.5 rounded-xl text-xs font-bold"
+                                                className="text-rose-600 bg-rose-50 hover:bg-rose-100 px-2 py-1 rounded text-xs font-bold"
                                             >
-                                                Устгах 🗑️
+                                                ✕
                                             </button>
                                         </div>
                                     </div>
@@ -4626,7 +4726,6 @@
             );
         }
 
-        // Render Application
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
     </script>
